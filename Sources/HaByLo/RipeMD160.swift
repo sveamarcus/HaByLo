@@ -1,3 +1,17 @@
+//===----------------------------------------------------------------------===//
+//
+// This source file is part of the fltrECC open source project
+//
+// Copyright (c) 2022-2026 fltrWallet AG and the fltrECC project authors
+// Licensed under Apache License v2.0
+//
+// See LICENSE.md for license information
+// See CONTRIBUTORS.txt for the list of SwiftNIO project authors
+//
+// SPDX-License-Identifier: Apache-2.0
+//
+//===----------------------------------------------------------------------===//
+
 public struct RipeMD160: Sendable {
     @usableFromInline
     var MDbuf: (UInt32, UInt32, UInt32, UInt32, UInt32)
@@ -337,9 +351,13 @@ public struct RipeMD160: Sendable {
         var X = [UInt32](repeating: 0, count: 16)
         var pos = data.startIndex
         var length = data.count
+        count += Int64(length)
 
-        // Process remaining bytes from last call:
-        if buffer.count > 0 && buffer.count + length >= 64 {
+        if !buffer.isEmpty {
+            guard buffer.count + length >= 64 else {
+                buffer.append(contentsOf: data)
+                return
+            }
             let amount = 64 - buffer.count
             data.formIndex(&pos, offsetBy: amount)
             length -= amount
@@ -348,6 +366,7 @@ public struct RipeMD160: Sendable {
                 $0.copyBytes(from: buffer)
             }
             compress(X)
+            buffer = []
         }
 
         // Process 64 byte chunks:
@@ -363,7 +382,6 @@ public struct RipeMD160: Sendable {
 
         // Save remaining unprocessed bytes:
         buffer = data[pos...]
-        count += Int64(data.count)
     }
 
     @inlinable

@@ -1,9 +1,23 @@
+//===----------------------------------------------------------------------===//
+//
+// This source file is part of the fltrECC open source project
+//
+// Copyright (c) 2022-2026 fltrWallet AG and the fltrECC project authors
+// Licensed under Apache License v2.0
+//
+// See LICENSE.md for license information
+// See CONTRIBUTORS.txt for the list of SwiftNIO project authors
+//
+// SPDX-License-Identifier: Apache-2.0
+//
+//===----------------------------------------------------------------------===//
+
 import struct Foundation.Data
 
 public extension BinaryInteger {
     @inlinable
     var variableLengthCode: Data {
-        assert(self.signum() >= 0)
+        precondition(self.signum() >= 0)
 
         var data = Data()
 
@@ -18,7 +32,7 @@ public extension BinaryInteger {
             let swapped = UInt32(truncatingIfNeeded: self).littleEndian
             let bits = withUnsafeBytes(of: swapped) { Data($0) }
             data.append(bits)
-        case _ where self > 0x00_00_00_01_00_00_00_00:  // ...0xFF_FF_FF_FF_FF_FF_FF_FF
+        case _ where self > 0xFF_FF_FF_FF:  // 0x1_0000_0000 ... 0xFF_FF_FF_FF_FF_FF_FF_FF
             data.append(0xFF)
             let swapped = UInt64(truncatingIfNeeded: self).littleEndian
             let bits = withUnsafeBytes(of: swapped) { Data($0) }
@@ -33,7 +47,7 @@ public extension BinaryInteger {
 public extension BinaryInteger {
     @inlinable
     var cVarInt: [UInt8] {
-        assert(self.signum() >= 0)
+        precondition(self.signum() >= 0)
 
         var bytes: [UInt8] = []
         bytes.reserveCapacity((self.bitWidth + 6) / 7)

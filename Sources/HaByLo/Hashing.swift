@@ -1,3 +1,17 @@
+//===----------------------------------------------------------------------===//
+//
+// This source file is part of the fltrECC open source project
+//
+// Copyright (c) 2022-2026 fltrWallet AG and the fltrECC project authors
+// Licensed under Apache License v2.0
+//
+// See LICENSE.md for license information
+// See CONTRIBUTORS.txt for the list of SwiftNIO project authors
+//
+// SPDX-License-Identifier: Apache-2.0
+//
+//===----------------------------------------------------------------------===//
+
 import struct Crypto.SHA256
 import protocol Foundation.ContiguousBytes
 import struct NIOCore.ByteBuffer
@@ -35,7 +49,7 @@ public extension Array where Element == UInt8 {
 
     @inlinable
     var checksum: UInt32 {
-        self.hash256.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }
+        self.hash256.withUnsafeBytes { UInt32(littleEndian: $0.loadUnaligned(as: UInt32.self)) }
     }
 }
 
@@ -52,7 +66,7 @@ public extension ArraySlice where Element == UInt8 {
 
     @inlinable
     var checksum: UInt32 {
-        self.hash256.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }
+        self.hash256.withUnsafeBytes { UInt32(littleEndian: $0.loadUnaligned(as: UInt32.self)) }
     }
 }
 
@@ -69,7 +83,7 @@ public extension ByteBuffer {
 
     @inlinable
     var checksum: UInt32 {
-        self.hash256.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }
+        self.hash256.withUnsafeBytes { UInt32(littleEndian: $0.loadUnaligned(as: UInt32.self)) }
     }
 }
 
@@ -86,7 +100,7 @@ public extension ContiguousBytes {
 
     @inlinable
     var checksum: UInt32 {
-        self.hash256.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }
+        self.hash256.withUnsafeBytes { UInt32(littleEndian: $0.loadUnaligned(as: UInt32.self)) }
     }
 }
 
@@ -103,7 +117,7 @@ public extension Sequence where Element == UInt8 {
 
     @inlinable
     var checksum: UInt32 {
-        self.hash256.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }
+        self.hash256.withUnsafeBytes { UInt32(littleEndian: $0.loadUnaligned(as: UInt32.self)) }
     }
 }
 
@@ -112,17 +126,26 @@ public extension ByteBuffer {
     mutating func readCVarInt<T: UnsignedInteger>(as: T.Type = T.self) -> T? {
         let save = self
 
-        let maxWidth: T = T(MemoryLayout<T>.size - 1) * 8
+        let width = MemoryLayout<T>.size * 8
+        let highBit: T = 1 << (width - 1)
+        let maxValue: T = highBit | (highBit - 1)
+        let shiftLimit = width - 7
 
         var result: T = 0
         while let nextByte = self.readInteger(as: UInt8.self) {
-            // Overflow check
-            guard result >> maxWidth == 0 else {
+            // Reject inputs whose next 7-bit shift would discard high bits.
+            guard result >> shiftLimit == 0 else {
+                self = save
                 return nil
             }
 
             result = (result << 7) | T(nextByte & 0x7F)
             if (nextByte & 0x80) > 0 {
+                // Continuation byte adds one; reject if that would exceed T.max.
+                guard result < maxValue else {
+                    self = save
+                    return nil
+                }
                 result += 1
             } else {
                 return result

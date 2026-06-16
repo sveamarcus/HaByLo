@@ -1,5 +1,17 @@
-// swift-log is the cross-platform logging backend. os_signpost / OSLog tracing is
-// Apple-only and gated behind `#if canImport(os)` further down.
+//===----------------------------------------------------------------------===//
+//
+// This source file is part of the fltrECC open source project
+//
+// Copyright (c) 2022-2026 fltrWallet AG and the fltrECC project authors
+// Licensed under Apache License v2.0
+//
+// See LICENSE.md for license information
+// See CONTRIBUTORS.txt for the list of SwiftNIO project authors
+//
+// SPDX-License-Identifier: Apache-2.0
+//
+//===----------------------------------------------------------------------===//
+
 import Logging
 
 import struct Foundation.Date
@@ -10,16 +22,12 @@ import struct Foundation.TimeInterval
     import os.log
 #endif
 
-// `nonisolated(unsafe)` keeps the global usable from any isolation without forcing a
-// `Sendable` requirement onto the public `HaByLoLogger` protocol (which would be a
-// source-breaking change for downstream conformers that hold non-Sendable state).
 #if DEBUG
     nonisolated(unsafe) public let logger: any HaByLoLogger = PrintLogger()
 #else
     nonisolated(unsafe) public let logger: any HaByLoLogger = NoLogger()
 #endif
 
-// Read-only verbosity knob. Racy by design; reads/writes need no synchronization.
 nonisolated(unsafe) public var LOG_LEVEL = LogLevel.Info
 
 public struct NoLogger: HaByLoLogger {

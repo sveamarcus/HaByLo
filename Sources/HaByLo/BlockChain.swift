@@ -2,7 +2,7 @@
 //
 // This source file is part of the fltrECC open source project
 //
-// Copyright (c) 2022 fltrWallet AG and the fltrECC project authors
+// Copyright (c) 2022-2026 fltrWallet AG and the fltrECC project authors
 // Licensed under Apache License v2.0
 //
 // See LICENSE.md for license information
@@ -36,11 +36,7 @@ public extension BlockChain {
     }
 }
 
-// `BlockChain.Hash` is an immutable value: its only stored property is read-only,
-// the phantom `HashType` is not stored, and the funnel initializer copies its input
-// into value-typed storage (see `init(_:Endian)`), so no external reference storage
-// can ever be aliased. The conformance is unchecked only because the type-erased
-// `AnyBidirectionalCollection<UInt8>` box is not itself `Sendable`.
+// `BlockChain.Hash` is an immutable value: its only stored property is read-only
 extension BlockChain.Hash: @unchecked Sendable {}
 
 public protocol MerkleSourceHash {}
@@ -62,17 +58,13 @@ public extension BlockChain.Hash {
 
     @usableFromInline
     internal init<C: BidirectionalCollection>(_ hash: Endian<C>) where C.Element == UInt8 {
-        // Snapshot into value-typed storage before type-erasing: a generic
-        // `BidirectionalCollection` argument may be a reference type, and
-        // `AnyBidirectionalCollection` retains (aliases) rather than copies it — which
-        // would make the `@unchecked Sendable` conformance unsound. `Array(_:)` forces
-        // an eager copy (32 bytes for a hash).
         switch hash {
         case .big(let c):
             self.littleEndian = .init(Array(c.reversed()))
         case .little(let c):
             self.littleEndian = .init(Array(c))
         }
+        precondition(self.littleEndian.count == 32, "BlockChain.Hash must be exactly 32 bytes")
     }
 
     @inlinable
@@ -194,6 +186,7 @@ extension BlockChain.Hash where HashType: MerkleSourceHash {
 extension BlockChain.Hash: Equatable {
     @inlinable
     public static func == (lhs: BlockChain.Hash<HashType>, rhs: BlockChain.Hash<HashType>) -> Bool {
+        guard lhs.littleEndian.count == rhs.littleEndian.count else { return false }
         for (lhs, rhs) in zip(lhs.littleEndian, rhs.littleEndian) {
             guard lhs == rhs else {
                 return false
@@ -228,8 +221,7 @@ extension BlockChain.Hash: Comparable {
                 return false
             }
         }
-        // equals
-        return false
+        return lhs.count < rhs.count
     }
 }
 
@@ -374,22 +366,23 @@ public extension BlockChain {
         )
     where C.Element == BlockChain.Hash<T> {
 
-        assert(collection.count > 1)
-        let offset = index ^ 0b1
-        let neighbourIndex = min(
-            collection.index(collection.startIndex, offsetBy: offset),
-            collection.endIndex
-        )
-        let neighbour = MerklePosition(index: offset, hash: collection[neighbourIndex])
+        precondition(collection.count > 1)
+        precondition(index >= 0 && index < collection.count, "leaf index out of range")
 
         let tree = try Self._inner(collection, count: collection.count)
-        let parents: [MerklePosition<MerkleHash>] = tree.tree.enumerated().map {
-            let offset = (index / (2 * ($0.offset + 1))) ^ 0b1
-            let parentIndex = min(
-                offset,
-                $0.element.endIndex
-            )
-            return MerklePosition(index: offset, hash: $0.element[parentIndex])
+
+        let leafSibling = (index ^ 0b1) < collection.count ? (index ^ 0b1) : index
+        let neighbour = MerklePosition<T>(
+            index: leafSibling,
+            hash: collection[collection.index(collection.startIndex, offsetBy: leafSibling)]
+        )
+
+        var parents: [MerklePosition<MerkleHash>] = []
+        parents.reserveCapacity(Swift.max(0, tree.tree.count - 1))
+        for (level, nodes) in tree.tree.enumerated() where level < tree.tree.count - 1 {
+            let node = index >> (level + 1)
+            let sibling = (node ^ 0b1) < nodes.count ? (node ^ 0b1) : node
+            parents.append(MerklePosition(index: sibling, hash: nodes[sibling]))
         }
 
         return (neighbour, parents, tree.root)
@@ -402,7 +395,6 @@ public extension BlockChain {
         parents: [MerklePosition<MerkleHash>]
     ) -> BlockChain.Hash<MerkleHash> {
 
-        assert(parents.count > 0)
         let first = neighbour.merklePair(value)
         return parents.reduce(first) {
             $1.merklePair($0)
