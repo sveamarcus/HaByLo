@@ -11,35 +11,57 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 //===----------------------------------------------------------------------===//
-import struct Foundation.CharacterSet
-import struct NIOCore.ByteBufferView
+
+// Lowercase hex digit table, indexed by nibble value (0...15). Computed once.
+@usableFromInline
+let _hexAlphabet: [UInt8] = Array("0123456789abcdef".utf8)
+
+// Decodes one ASCII hex digit ('0'-'9', 'a'-'f', 'A'-'F') to its 0...15 value, or
+// nil when the byte is not a hex digit.
+@inlinable
+func _hexNibble(_ ascii: UInt8) -> UInt8? {
+    switch ascii {
+    case 0x30...0x39: return ascii &- 0x30  // '0'...'9'
+    case 0x61...0x66: return ascii &- 0x61 &+ 10  // 'a'...'f'
+    case 0x41...0x46: return ascii &- 0x41 &+ 10  // 'A'...'F'
+    default: return nil
+    }
+}
 
 // MARK: withUnsafeRandomAccess
 public extension Sequence where Element == UInt8 {
+    // Zero-copy contiguous access when the sequence already has contiguous storage
+    // (Array, ArraySlice, ByteBufferView, …); materializes into an Array only as a
+    // last resort for non-contiguous sequences.
     @inlinable
-    func withUnsafeRandomAccess<R>(_ closure: (UnsafeRawBufferPointer) throws -> R ) rethrows -> R {
-        try self.withContiguousStorageIfAvailable {
-            try $0.withUnsafeBytes {
-                try closure($0)
-            }
-        } ?? Array(self).withUnsafeBytes {
-            try closure($0)
+    func withUnsafeRandomAccess<R>(_ closure: (UnsafeRawBufferPointer) throws -> R) rethrows -> R {
+        try self.withContiguousStorageIfAvailable { buffer in
+            try closure(UnsafeRawBufferPointer(buffer))
         }
+            ?? Array(self).withUnsafeBufferPointer { buffer in
+                try closure(UnsafeRawBufferPointer(buffer))
+            }
     }
 }
 
 // MARK: hexEncodedString
 public extension Sequence where Element == UInt8 {
+    // Lowercase hex encoding built in a single UTF-8 byte buffer (two ASCII digits
+    // per input byte) and wrapped once as a String — no per-byte String allocation,
+    // no `String(format:)` (Foundation), and no `joined()`.
     @inlinable
     var hexEncodedString: String {
-        self.map { c in
-            String(format: "%02hhx", c)
+        var ascii: [UInt8] = []
+        ascii.reserveCapacity(self.underestimatedCount * 2)
+        for byte in self {
+            ascii.append(_hexAlphabet[Int(byte >> 4)])
+            ascii.append(_hexAlphabet[Int(byte & 0x0F)])
         }
-        .joined()
+        return String(decoding: ascii, as: UTF8.self)
     }
 }
 
-// MARK: String // hex2Bytes, hex2Hash, ascii
+// MARK: String // ascii, hex2Bytes, hex2Hash, isHex
 public extension StringProtocol {
     @inlinable
     var ascii: [UInt8] {
@@ -48,38 +70,39 @@ public extension StringProtocol {
         }
     }
 
+    // Parses a hex string by scanning UTF-8 code units directly — no intermediate
+    // `[Character]` and no per-pair `String`. A pair containing a non-hex digit is
+    // skipped (matching the previous `compactMap` semantics); a dangling final
+    // nibble on odd-length input is ignored rather than trapping.
     @inlinable
     var hex2Bytes: [UInt8] {
-        let characters = Array(self)
-        return stride(from: 0, to: self.count, by: 2).compactMap {
-            UInt8(String(characters[$0...$0.advanced(by: 1)]), radix: 16)
+        let utf8 = self.utf8
+        var bytes: [UInt8] = []
+        bytes.reserveCapacity(utf8.underestimatedCount / 2)
+        var iterator = utf8.makeIterator()
+        while let high = iterator.next() {
+            guard let low = iterator.next() else { break }
+            guard let hi = _hexNibble(high), let lo = _hexNibble(low) else { continue }
+            bytes.append(hi << 4 | lo)
         }
+        return bytes
     }
-    
+
     @inlinable
     func hex2Hash<To>(as: To.Type = To.self) -> BlockChain.Hash<To> {
-        var index = self.startIndex
-        let bytes: [UInt8] = stride(from: 0, to: self.count, by: 2).compactMap { _ in
-            let nextIndex = self.index(after: index)
-            let chars = self[index ... nextIndex]
-            self.formIndex(&index, offsetBy: 2)
-            return UInt8(chars, radix: 16)
-        }
-        return .init(.big(bytes))
+        .init(.big(self.hex2Bytes))
     }
 
+    // True iff the string has even length and every code unit is a hex digit
+    // (case-insensitive). Single pass over UTF-8 with no `CharacterSet`
+    // construction or `lowercased()` copy.
     @inlinable
     func isHex() -> Bool {
-        var allowed = CharacterSet()
-        allowed.insert(charactersIn: "0123456789abcdef")
-
-        let lower = self.lowercased()
-        guard self.count % 2 == 0,
-              lower.unicodeScalars.allSatisfy({ allowed.contains($0) })
-        else {
-            return false
+        var count = 0
+        for byte in self.utf8 {
+            guard _hexNibble(byte) != nil else { return false }
+            count &+= 1
         }
-        
-        return true
+        return count % 2 == 0
     }
 }

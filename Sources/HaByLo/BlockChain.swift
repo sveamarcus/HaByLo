@@ -11,7 +11,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 //===----------------------------------------------------------------------===//
-import struct Foundation.CharacterSet
 
 public enum BlockChain {}
 
@@ -31,21 +30,28 @@ public extension BlockChain {
         public var count: Int {
             self.littleEndian.count
         }
-        
+
         @inlinable
         public static var zero: Hash<HashType> { 0 }
     }
 }
 
+// `BlockChain.Hash` is an immutable value: its only stored property is read-only,
+// the phantom `HashType` is not stored, and the funnel initializer copies its input
+// into value-typed storage (see `init(_:Endian)`), so no external reference storage
+// can ever be aliased. The conformance is unchecked only because the type-erased
+// `AnyBidirectionalCollection<UInt8>` box is not itself `Sendable`.
+extension BlockChain.Hash: @unchecked Sendable {}
+
 public protocol MerkleSourceHash {}
 
-public enum BlockHeaderHash {}
-public enum CompactFilterHash {}
-public enum CompactFilterHeaderHash {}
-public enum MerkleHash: MerkleSourceHash {}
-public enum SignatureHash {}
-public enum TransactionLegacyHash: MerkleSourceHash {}
-public enum TransactionWitnessHash: MerkleSourceHash {}
+public enum BlockHeaderHash: Sendable {}
+public enum CompactFilterHash: Sendable {}
+public enum CompactFilterHeaderHash: Sendable {}
+public enum MerkleHash: MerkleSourceHash, Sendable {}
+public enum SignatureHash: Sendable {}
+public enum TransactionLegacyHash: MerkleSourceHash, Sendable {}
+public enum TransactionWitnessHash: MerkleSourceHash, Sendable {}
 
 // MARK: Hash / Initializer
 public extension BlockChain.Hash {
@@ -53,23 +59,28 @@ public extension BlockChain.Hash {
         case big(C)
         case little(C)
     }
-    
+
     @usableFromInline
     internal init<C: BidirectionalCollection>(_ hash: Endian<C>) where C.Element == UInt8 {
+        // Snapshot into value-typed storage before type-erasing: a generic
+        // `BidirectionalCollection` argument may be a reference type, and
+        // `AnyBidirectionalCollection` retains (aliases) rather than copies it — which
+        // would make the `@unchecked Sendable` conformance unsound. `Array(_:)` forces
+        // an eager copy (32 bytes for a hash).
         switch hash {
         case .big(let c):
-            self.littleEndian = .init(c.reversed())
+            self.littleEndian = .init(Array(c.reversed()))
         case .little(let c):
-            self.littleEndian = .init(c)
+            self.littleEndian = .init(Array(c))
         }
     }
-    
+
     @inlinable
     static func big<C: BidirectionalCollection>(_ hash: C) -> Self where C.Element == UInt8 {
         assert(hash.count == 32)
         return self.init(.big(hash))
     }
-    
+
     @inlinable
     static func little<C: BidirectionalCollection>(_ hash: C) -> Self where C.Element == UInt8 {
         assert(hash.count == 32)
@@ -94,37 +105,42 @@ extension BlockChain.Hash: ExpressibleByArrayLiteral {
 
 extension BlockChain.Hash: ExpressibleByIntegerLiteral {
     @inlinable
-    public init(integerLiteral value: UInt64)  {
-        self.init(.little(
-            value.littleEndianBytes + (0..<24).map { _ in 0 }
-        ))
+    public init(integerLiteral value: UInt64) {
+        self.init(
+            .little(
+                value.littleEndianBytes + Array(repeating: 0, count: 24)
+            ))
     }
 }
 
 // MARK: Hash / Hashers
 public extension BlockChain.Hash {
     @inlinable
-    static func makeHash<Stream: Sequence>(from stream: Stream) -> BlockChain.Hash<HashType> where Stream.Element == UInt8 {
+    static func makeHash<Stream: Sequence>(from stream: Stream) -> BlockChain.Hash<HashType>
+    where Stream.Element == UInt8 {
         Self(.little(stream.hash256))
     }
-    
+
     @inlinable
-    func appendHash<C: BidirectionalCollection>(_ suffix: Endian<C>) -> BlockChain.Hash<HashType> where C.Element == UInt8 {
-        var parts: [AnyBidirectionalCollection<UInt8>] = [ .init(self.littleEndian) ]
+    func appendHash<C: BidirectionalCollection>(_ suffix: Endian<C>) -> BlockChain.Hash<HashType>
+    where C.Element == UInt8 {
+        var parts: [AnyBidirectionalCollection<UInt8>] = [.init(self.littleEndian)]
         switch suffix {
         case .big(let next):
             parts.append(.init(next.reversed()))
         case .little(let next):
             parts.append(.init(next))
         }
-        
+
         return .makeHash(from: parts.joined())
     }
-    
+
     @inlinable
-    func appendHash<T>(_ suffix: BlockChain.Hash<HashType>, as: T.Type = T.self) -> BlockChain.Hash<T> {
-        .makeHash(from:
-            [self.littleEndian, suffix.littleEndian].joined()
+    func appendHash<T>(_ suffix: BlockChain.Hash<HashType>, as: T.Type = T.self)
+        -> BlockChain.Hash<T>
+    {
+        .makeHash(
+            from: [self.littleEndian, suffix.littleEndian].joined()
         )
     }
 }
@@ -132,7 +148,9 @@ public extension BlockChain.Hash {
 extension BlockChain.Hash where HashType == BlockHeaderHash {}
 extension BlockChain.Hash where HashType == CompactFilterHash {
     @inlinable
-    public func appendHash(_ suffix: BlockChain.Hash<CompactFilterHeaderHash>) -> BlockChain.Hash<CompactFilterHeaderHash> {
+    public func appendHash(_ suffix: BlockChain.Hash<CompactFilterHeaderHash>)
+        -> BlockChain.Hash<CompactFilterHeaderHash>
+    {
         let headerHash: BlockChain.Hash<CompactFilterHeaderHash> = .init(.little(self.littleEndian))
         return headerHash.appendHash(suffix)
     }
@@ -149,22 +167,23 @@ extension BlockChain.Hash where HashType == TransactionLegacyHash {
 extension BlockChain.Hash where HashType == TransactionWitnessHash {}
 
 extension BlockChain.Hash where HashType: MerkleSourceHash {
-    public struct IdenticalHashPairError: Swift.Error {
+    public struct IdenticalHashPairError: Swift.Error, Sendable {
         @inlinable
         public init() {}
     }
-    
+
     @inlinable
-    public func merklePair(_ rhs: BlockChain.Hash<HashType>?) throws -> BlockChain.Hash<MerkleHash> {
+    public func merklePair(_ rhs: BlockChain.Hash<HashType>?) throws -> BlockChain.Hash<MerkleHash>
+    {
         assert(self.count == 32 && rhs?.count ?? 32 == 32)
-        
+
         guard self != rhs else {
             throw IdenticalHashPairError()
         }
-        
+
         return self.appendHash(rhs ?? self)
     }
-    
+
     @inlinable
     public var asMerkleHash: BlockChain.Hash<MerkleHash> {
         .init(.little(self.littleEndian))
@@ -189,10 +208,10 @@ extension BlockChain.Hash: Hashable {
     public func hash(into hasher: inout Hasher) {
         let prefix = self.littleEndian.prefix(MemoryLayout<Int>.size)
         var parseInt: Int = 0
-        
-        prefix.forEach {
+
+        for byte in prefix {
             parseInt = parseInt &<< 8
-            parseInt |= Int($0)
+            parseInt |= Int(byte)
         }
 
         hasher.combine(parseInt)
@@ -220,30 +239,30 @@ extension BlockChain.Hash: Codable {
         var container = encoder.singleValueContainer()
         try container.encode(self.bigEndian.hexEncodedString)
     }
-    
+
     @usableFromInline
     struct HexError: Swift.Error {
         @usableFromInline
         internal init() {}
     }
-    
+
     @inlinable
     public init(from decoder: Decoder) throws {
-        
+
         let decoder = try decoder.singleValueContainer()
         let string = try decoder.decode(String.self)
-        
+
         func checkStringHex(_ string: String) throws {
             guard string.count == 64,
-                  string.isHex()
+                string.isHex()
             else {
                 throw HexError()
             }
         }
-        
+
         try checkStringHex(string)
         let bytes = string.hex2Bytes
-        
+
         self = .big(bytes)
     }
 }
@@ -258,73 +277,76 @@ extension BlockChain.Hash: CustomStringConvertible {
 
 // MARK: MerkleTree
 public extension BlockChain {
-    struct Error: Swift.Error {
+    struct Error: Swift.Error, Sendable {
         @usableFromInline
         let description: String
         @usableFromInline
         let event: StaticString
-        
+
         @inlinable
         public init(description: String, event: StaticString) {
             self.description = description
             self.event = event
         }
     }
-    
+
     @inlinable
-    static func _inner<S: Sequence, T: MerkleSourceHash>(_ hashList: S,
-                                                         count: Int,
-                                                         tree: [[BlockChain.Hash<MerkleHash>]] = .init())
-    throws -> (root: BlockChain.Hash<MerkleHash>, tree: [[BlockChain.Hash<MerkleHash>]])
+    static func _inner<S: Sequence, T: MerkleSourceHash>(
+        _ hashList: S,
+        count: Int,
+        tree: [[BlockChain.Hash<MerkleHash>]] = .init()
+    )
+        throws -> (root: BlockChain.Hash<MerkleHash>, tree: [[BlockChain.Hash<MerkleHash>]])
     where S.Element == BlockChain.Hash<T> {
-        
+
         var hashIterator = hashList.makeIterator()
-        
+
         guard count > 1 else {
             guard let root = hashIterator.next()?.asMerkleHash else {
-                throw Error(description: "sequence input hashList cannot be empty",
-                            event: #function)
+                throw Error(
+                    description: "sequence input hashList cannot be empty",
+                    event: #function)
             }
             return (root, tree)
         }
-        
+
         var parentHashes: [BlockChain.Hash<MerkleHash>] = []
         while let left = hashIterator.next() {
             let right = hashIterator.next()
             try parentHashes.append(left.merklePair(right))
         }
-        
+
         let halfCeiling = (count + 1) / 2
         return try Self._inner(parentHashes, count: halfCeiling, tree: tree + [parentHashes])
     }
-    
+
     @inlinable
     static func merkleRoot<C: Collection, T: MerkleSourceHash>(from collection: C)
-    throws -> BlockChain.Hash<MerkleHash>
+        throws -> BlockChain.Hash<MerkleHash>
     where C.Element == BlockChain.Hash<T> {
-        
+
         return try Self._inner(collection, count: collection.count).root
     }
-    
+
     @inlinable
     static func merkleTree<C: Collection, T: MerkleSourceHash>(from collection: C)
-    throws -> [[BlockChain.Hash<MerkleHash>]]
+        throws -> [[BlockChain.Hash<MerkleHash>]]
     where C.Element == BlockChain.Hash<T> {
-        
+
         return try Self._inner(collection, count: collection.count).tree
     }
-    
-    enum MerklePosition<T: MerkleSourceHash> {
+
+    enum MerklePosition<T: MerkleSourceHash>: Sendable {
         case left(BlockChain.Hash<T>)
         case right(BlockChain.Hash<T>)
-        
+
         @inlinable
         public init(index: Int, hash: BlockChain.Hash<T>) {
             self = index & 0b1 == 0 ? .left(hash) : .right(hash)
         }
-        
+
         @inlinable
-        public static prefix func !(value: Self) -> Self {
+        public static prefix func ! (value: Self) -> Self {
             switch value {
             case .left(let hash):
                 return .right(hash)
@@ -332,7 +354,7 @@ public extension BlockChain {
                 return .left(hash)
             }
         }
-        
+
         @inlinable
         public func merklePair(_ hash: BlockChain.Hash<T>) -> BlockChain.Hash<MerkleHash> {
             switch self {
@@ -343,12 +365,15 @@ public extension BlockChain {
             }
         }
     }
-    
+
     @inlinable
     static func merkleProof<C: Collection, T: MerkleSourceHash>(from collection: C, index: Int)
-    throws -> (neighbour: MerklePosition<T>, parents: [MerklePosition<MerkleHash>], root: BlockChain.Hash<MerkleHash>)
+        throws -> (
+            neighbour: MerklePosition<T>, parents: [MerklePosition<MerkleHash>],
+            root: BlockChain.Hash<MerkleHash>
+        )
     where C.Element == BlockChain.Hash<T> {
-        
+
         assert(collection.count > 1)
         let offset = index ^ 0b1
         let neighbourIndex = min(
@@ -356,7 +381,7 @@ public extension BlockChain {
             collection.endIndex
         )
         let neighbour = MerklePosition(index: offset, hash: collection[neighbourIndex])
-        
+
         let tree = try Self._inner(collection, count: collection.count)
         let parents: [MerklePosition<MerkleHash>] = tree.tree.enumerated().map {
             let offset = (index / (2 * ($0.offset + 1))) ^ 0b1
@@ -366,17 +391,17 @@ public extension BlockChain {
             )
             return MerklePosition(index: offset, hash: $0.element[parentIndex])
         }
-        
+
         return (neighbour, parents, tree.root)
     }
-    
+
     @inlinable
     static func merkleVerifyProof<T: MerkleSourceHash>(
         _ value: BlockChain.Hash<T>,
         neighbour: MerklePosition<T>,
         parents: [MerklePosition<MerkleHash>]
     ) -> BlockChain.Hash<MerkleHash> {
-        
+
         assert(parents.count > 0)
         let first = neighbour.merklePair(value)
         return parents.reduce(first) {

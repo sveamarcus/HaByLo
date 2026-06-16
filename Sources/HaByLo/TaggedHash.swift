@@ -1,23 +1,29 @@
+import struct Crypto.SHA256
+
 public protocol TaggedHash {
     static var tag: [UInt8] { get }
 }
 
 public extension BlockChain.Hash where HashType: TaggedHash {
-    @inlinable
-    static func makeHash<Stream: Collection>(from stream: Stream) -> BlockChain.Hash<HashType> where Stream.Element == UInt8 {
-        Self(
-            .little(
-                [ HashType.tag, HashType.tag + stream, ]
-                    .joined()
-                    .sha256
-            )
-        )
+    // Tagged hash = SHA256(tag ‖ tag ‖ message)
+    @usableFromInline
+    internal static func _taggedHash(message: UnsafeRawBufferPointer) -> BlockChain.Hash<HashType> {
+        var hasher = SHA256()
+        HashType.tag.withUnsafeBytes { hasher.update(bufferPointer: $0) }
+        HashType.tag.withUnsafeBytes { hasher.update(bufferPointer: $0) }
+        hasher.update(bufferPointer: message)
+        return Self(.little(Array(hasher.finalize())))
     }
 
     @inlinable
-    static func makeHash<Stream: Sequence>(from stream: Stream) -> BlockChain.Hash<HashType> where Stream.Element == UInt8 {
-        stream.withUnsafeRandomAccess { bp in
-            Self.makeHash(from: bp)
-        }
+    static func makeHash<Stream: Collection>(from stream: Stream) -> BlockChain.Hash<HashType>
+    where Stream.Element == UInt8 {
+        stream.withUnsafeRandomAccess { Self._taggedHash(message: $0) }
+    }
+
+    @inlinable
+    static func makeHash<Stream: Sequence>(from stream: Stream) -> BlockChain.Hash<HashType>
+    where Stream.Element == UInt8 {
+        stream.withUnsafeRandomAccess { Self._taggedHash(message: $0) }
     }
 }

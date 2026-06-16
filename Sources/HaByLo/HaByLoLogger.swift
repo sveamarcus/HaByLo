@@ -1,44 +1,26 @@
-import os.log
+// swift-log is the cross-platform logging backend. os_signpost / OSLog tracing is
+// Apple-only and gated behind `#if canImport(os)` further down.
+import Logging
+
 import struct Foundation.Date
-import class Foundation.DateComponentsFormatter
-import class Foundation.NSString
 import struct Foundation.TimeInterval
 
-//private var _log_level_lock = os_unfair_lock()
-//private var _log_level_value: LogLevel = .Log
-//public var LOG_LEVEL: LogLevel {
-//    get {
-//        defer {
-//            os_unfair_lock_unlock(&_log_level_lock)
-//        }
-//        os_unfair_lock_lock(&_log_level_lock)
-//        return _log_level_value
-//    }
-//    set {
-//        defer {
-//            os_unfair_lock_unlock(&_log_level_lock)
-//        }
-//        os_unfair_lock_lock(&_log_level_lock)
-//        _log_level_value = newValue
-//    }
-//}
-#if DEBUG
-public let logger: HaByLoLogger = {
-    var print: Bool! = false
-
-    print = true
-
-    if print {
-        return PrintLogger()
-    } else {
-        return NoLogger()
-    }
-}()
-#else
-public let logger = NoLogger()
+#if canImport(os)
+    import class Foundation.NSString
+    import os.log
 #endif
 
-public var LOG_LEVEL = LogLevel.Info
+// `nonisolated(unsafe)` keeps the global usable from any isolation without forcing a
+// `Sendable` requirement onto the public `HaByLoLogger` protocol (which would be a
+// source-breaking change for downstream conformers that hold non-Sendable state).
+#if DEBUG
+    nonisolated(unsafe) public let logger: any HaByLoLogger = PrintLogger()
+#else
+    nonisolated(unsafe) public let logger: any HaByLoLogger = NoLogger()
+#endif
+
+// Read-only verbosity knob. Racy by design; reads/writes need no synchronization.
+nonisolated(unsafe) public var LOG_LEVEL = LogLevel.Info
 
 public struct NoLogger: HaByLoLogger {
     public func primaryLog(_ logLevel: LogLevel, _ msgfunc: () -> String, _ values: [Any?]) {
@@ -46,8 +28,9 @@ public struct NoLogger: HaByLoLogger {
 }
 
 public protocol HaByLoLogger {
-    func primaryLog(_ logLevel: LogLevel, _ msgfunc: () -> String,
-                    _ values: [ Any? ] )
+    func primaryLog(
+        _ logLevel: LogLevel, _ msgfunc: () -> String,
+        _ values: [Any?])
 }
 
 public extension HaByLoLogger {
@@ -56,15 +39,15 @@ public extension HaByLoLogger {
         primaryLog(.Error, msg, values)
     }
     @inlinable
-    func warn (_ msg: @autoclosure () -> String, _ values: Any?...) {
+    func warn(_ msg: @autoclosure () -> String, _ values: Any?...) {
         primaryLog(.Warn, msg, values)
     }
     @inlinable
-    func log  (_ msg: @autoclosure () -> String, _ values: Any?...) {
+    func log(_ msg: @autoclosure () -> String, _ values: Any?...) {
         primaryLog(.Log, msg, values)
     }
     @inlinable
-    func info (_ msg: @autoclosure () -> String, _ values: Any?...) {
+    func info(_ msg: @autoclosure () -> String, _ values: Any?...) {
         primaryLog(.Info, msg, values)
     }
     @inlinable
@@ -73,44 +56,44 @@ public extension HaByLoLogger {
     }
 }
 
-public enum LogLevel : Int8 {
+public enum LogLevel: Int8, Sendable {
     case Error
     case Warn
     case Log
     case Info
     case Trace
-    
+
     @usableFromInline
-    var logPrefix : String {
+    var logPrefix: String {
         switch self {
         case .Error: return "ERROR: "
-        case .Warn:  return "WARN:  "
-        case .Info:  return "INFO:  "
+        case .Warn: return "WARN:  "
+        case .Info: return "INFO:  "
         case .Trace: return "Trace: "
-        case .Log:   return ""
+        case .Log: return ""
         }
     }
 }
 
 extension LogLevel {
+    // Maps HaByLo levels onto swift-log's Logger.Level (the cross-platform sink).
     @usableFromInline
-    var osLogLevel: os.OSLogType {
+    var swiftLogLevel: Logging.Logger.Level {
         switch self {
         case .Error: return .error
-        case .Warn: return .default
+        case .Warn: return .warning
         case .Info: return .info
-        // debug logging doesn't work rdar://47667447
-        case .Trace: return .info
-        case .Log: return .default
+        case .Trace: return .trace
+        case .Log: return .notice
         }
     }
 }
 
-public struct PrintLogger : HaByLoLogger {
+public struct PrintLogger: HaByLoLogger {
     @usableFromInline
     let _logLevel: LogLevel?
     @usableFromInline
-    let osLog = OSLog(subsystem: "blix", category: "general")
+    let backing: Logging.Logger
     @usableFromInline
     var logLevel: LogLevel {
         return _logLevel ?? LOG_LEVEL
@@ -121,38 +104,41 @@ public struct PrintLogger : HaByLoLogger {
     public var elapsedTime: TimeInterval {
         Date().timeIntervalSinceReferenceDate - startTime
     }
-    
+
     @inlinable
     public init(logLevel: LogLevel? = nil) {
         self.startTime = Date().timeIntervalSinceReferenceDate
         self._logLevel = logLevel
+        var backing = Logging.Logger(label: "blix")
+        // HaByLo performs its own LOG_LEVEL filtering in primaryLog, so let
+        // swift-log forward everything to the configured LogHandler.
+        backing.logLevel = .trace
+        self.backing = backing
     }
-    
+
     @inlinable
-    public func primaryLog(_ logLevel : LogLevel,
-                           _ msgfunc  : () -> String,
-                           _ values   : [ Any? ] ) {
-//        #if DEBUG
+    public func primaryLog(
+        _ logLevel: LogLevel,
+        _ msgfunc: () -> String,
+        _ values: [Any?]
+    ) {
         guard logLevel.rawValue <= self.logLevel.rawValue else { return }
-        
+
         let prefix = logLevel.logPrefix
         let s = msgfunc()
         let time = timeString(for: elapsedTime)
-        
+
+        let message: String
         if values.isEmpty {
-            let staticString = "[\(time)]\(prefix)\(s)"
-            os_log("%{public}@", log: osLog, type: logLevel.osLogLevel, staticString)
-//            print("[\(time)]\(prefix)\(s)")
+            message = "[\(time)]\(prefix)\(s)"
         } else {
             var ms = ""
             appendValues(values, to: &ms)
-            let staticString = "[\(time)]\(prefix)\(s)\(ms)"
-            os_log("%{public}@", log: osLog, type: logLevel.osLogLevel, staticString)
-//            print("[\(time)]\(prefix)\(s)\(ms)")
+            message = "[\(time)]\(prefix)\(s)\(ms)"
         }
-//        #endif
+        backing.log(level: logLevel.swiftLogLevel, "\(message)")
     }
-    
+
     @usableFromInline
     func timeString(for interval: TimeInterval) -> String {
         let i = UInt64(interval)
@@ -161,25 +147,30 @@ public struct PrintLogger : HaByLoLogger {
 
         return "\(hours)h \(minutes)m \(seconds)s"
     }
-    
+
     @usableFromInline
-    func appendValues(_ values: [ Any? ], to ms: inout String) {
+    func appendValues(_ values: [Any?], to ms: inout String) {
         for v in values {
             ms += " "
-            if      let v = v as? CustomStringConvertible { ms += v.description }
-            else if let v = v as? String                  { ms += v }
-            else if let v = v                             { ms += "\(v)" }
-            else                                          { ms += "<nil>" }
+            if let v = v as? CustomStringConvertible {
+                ms += v.description
+            } else if let v = v as? String {
+                ms += v
+            } else if let v = v {
+                ms += "\(v)"
+            } else {
+                ms += "<nil>"
+            }
         }
     }
 }
 
-public final class LogKeyForLine {
+public final class LogKeyForLine: Sendable {
     @usableFromInline
     let file: StaticString
     @usableFromInline
     let line: Int
-    
+
     @inlinable
     public init(_ file: StaticString, _ line: Int) {
         self.file = file
@@ -187,56 +178,80 @@ public final class LogKeyForLine {
     }
 }
 
-@usableFromInline
-func logHandleFor(subsystem: StaticString = "blixlib", line: Int = #line, category: StaticString = #fileID) -> (OSLog, OSSignpostID) {
-    let subsystemString = "app.fltr." + String(describing: subsystem)
-    let osLog = OSLog(subsystem: subsystemString, category: String(describing: category))
-    let osSignpostId = OSSignpostID(log: osLog, object: LogKeyForLine(category, line))
-    return (osLog, osSignpostId)
-}
+// MARK: - Signpost tracing
+//
+// os_signpost / OSLog are Apple-only. On every other Swift 6 platform (Linux,
+// Android, Windows, WASI, FreeBSD, …) the same public `trace` entry points are
+// provided as pass-through / no-ops, so callers compile and behave consistently
+// everywhere without `#if` at the call site.
+#if canImport(os)
 
-@inlinable
-public func trace(event: String, number: Int? = nil, function: StaticString = #function, line: Int = #line, category: StaticString = #fileID) {
-    let (osLog, id) = logHandleFor(line: line, category: category)
-    os_signpost(.event, log: osLog, name: function, signpostID: id, "%s", event, (number ?? 0) as NSInteger)
-}
-
-@inlinable
-public func trace<T>(begin message: StaticString = "%s",
-                     function: StaticString = #function,
-                     line: Int = #line,
-                     category: StaticString = #fileID,
-                     commands: () throws -> T) rethrows -> T {
-    let (osLog, id) = logHandleFor(line: line, category: category)
-    
-    guard osLog.signpostsEnabled
-    else {
-        return try commands()
+    @usableFromInline
+    func logHandleFor(
+        subsystem: StaticString = "blixlib", line: Int = #line, category: StaticString = #fileID
+    ) -> (OSLog, OSSignpostID) {
+        let subsystemString = "app.fltr." + String(describing: subsystem)
+        let osLog = OSLog(subsystem: subsystemString, category: String(describing: category))
+        let osSignpostId = OSSignpostID(log: osLog, object: LogKeyForLine(category, line))
+        return (osLog, osSignpostId)
     }
-    
-    let signpostName = function
-    os_signpost(.begin, log: osLog, name: signpostName, signpostID: id)
-    let result = try commands()
-    defer { os_signpost(.end, log: osLog, name: signpostName, signpostID: id, message, String(reflecting: result) as NSString) }
-    return result
-}
 
-//@inlinable
-//public func trace<T>(begin message: StaticString = "",
-//                     function: StaticString = #function,
-//                     line: Int = #line,
-//                     category: StaticString = #filePath,
-//                     commands: () throws -> T) rethrows -> T {
-//    let (osLog, id) = logHandleFor(line: line, category: category)
-//
-//    guard osLog.signpostsEnabled
-//    else {
-//        return try commands()
-//    }
-//
-//    let signpostName = function
-//    os_signpost(.begin, log: osLog, name: signpostName, signpostID: id)
-//    let result = try commands()
-//    defer { os_signpost(.end, log: osLog, name: signpostName, signpostID: id, message) }
-//    return result
-//}
+    @inlinable
+    public func trace(
+        event: String, number: Int? = nil, function: StaticString = #function, line: Int = #line,
+        category: StaticString = #fileID
+    ) {
+        let (osLog, id) = logHandleFor(line: line, category: category)
+        os_signpost(
+            .event, log: osLog, name: function, signpostID: id, "%s", event,
+            (number ?? 0) as NSInteger)
+    }
+
+    @inlinable
+    public func trace<T>(
+        begin message: StaticString = "%s",
+        function: StaticString = #function,
+        line: Int = #line,
+        category: StaticString = #fileID,
+        commands: () throws -> T
+    ) rethrows -> T {
+        let (osLog, id) = logHandleFor(line: line, category: category)
+
+        guard osLog.signpostsEnabled
+        else {
+            return try commands()
+        }
+
+        let signpostName = function
+        os_signpost(.begin, log: osLog, name: signpostName, signpostID: id)
+        let result = try commands()
+        defer {
+            os_signpost(
+                .end, log: osLog, name: signpostName, signpostID: id, message,
+                String(reflecting: result) as NSString)
+        }
+        return result
+    }
+
+#else
+
+    @inlinable
+    public func trace(
+        event: String, number: Int? = nil, function: StaticString = #function, line: Int = #line,
+        category: StaticString = #fileID
+    ) {
+        // No signpost facility on this platform; trace events are dropped.
+    }
+
+    @inlinable
+    public func trace<T>(
+        begin message: StaticString = "%s",
+        function: StaticString = #function,
+        line: Int = #line,
+        category: StaticString = #fileID,
+        commands: () throws -> T
+    ) rethrows -> T {
+        try commands()
+    }
+
+#endif
